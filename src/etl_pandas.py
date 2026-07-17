@@ -1,189 +1,102 @@
-# import pandas as pd
-# from pathlib import Path
-# import time
-# import datetime
-# from csv import writer
+"""Full-file aggregation using pandas."""
 
-# # Paths and constants
-# BASE_DIR = Path(__file__).resolve().parent.parent
-# INPUT_PATH = BASE_DIR / "data" / "weather_stations.csv"
-# OUTPUT_PATH = BASE_DIR / "data" / "measurements_pandas.csv"
-# LOG_PATH = BASE_DIR / "logs" / "log_pandas.csv"
+from __future__ import annotations
 
-# # Ensure directories exist
-# LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-# OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-
-# def log_step(step: str, status: str) -> None:
-#     with LOG_PATH.open("a", newline="") as log_file:
-#         log_writer = writer(log_file)
-#         timestamp = datetime.datetime.now().isoformat()
-#         if status.lower().startswith("success") or status.lower().startswith(
-#             "completed"
-#         ):
-#             status = "✅ " + status
-#         log_writer.writerow([timestamp, step, status])
-
-
-# def process_with_pandas():
-#     print("Starting ETL with pandas...")
-#     start_time = time.time()
-
-#     try:
-#         df = pd.read_csv(
-#             INPUT_PATH,
-#             sep=";",
-#             names=["station", "temperature"],
-#             dtype={"station": str, "temperature": float},
-#             skiprows=1,
-#         )
-#         log_step("Read CSV", f"Success: {len(df)} rows loaded")
-#         print(f"✅ CSV read successfully: {len(df)} rows loaded.")
-#     except Exception as e:
-#         log_step("Read CSV", f"Failed: {e}")
-#         print(f"❌ Failed to read CSV: {e}")
-#         return
-
-#     try:
-#         df_kpi = (
-#             df.groupby("station")["temperature"]
-#             .agg(["min", "mean", "max"])
-#             .reset_index()
-#         )
-#         log_step("Aggregate stats", f"Success: {len(df_kpi)} stations processed")
-#         print(f"✅ Statistics calculated successfully: {len(df_kpi)} stations.")
-#     except Exception as e:
-#         log_step("Aggregate stats", f"Failed: {e}")
-#         print(f"❌ Failed to calculate statistics: {e}")
-#         return
-
-#     try:
-#         df_sorted = df_kpi.sort_values("station")
-
-#         # Formatando com duas casas decimais (como string)
-#         df_sorted["min"] = df_sorted["min"].map("{:.2f}".format)
-#         df_sorted["mean"] = df_sorted["mean"].map("{:.2f}".format)
-#         df_sorted["max"] = df_sorted["max"].map("{:.2f}".format)
-
-#         df_sorted.to_csv(OUTPUT_PATH, index=False, sep=";")
-#         log_step("Save output", "Success")
-#         print(f"✅ Results saved to: {OUTPUT_PATH}")
-#     except Exception as e:
-#         log_step("Save output", f"Failed: {e}")
-#         print(f"❌ Failed to save results: {e}")
-#         return
-
-#     elapsed = time.time() - start_time
-#     print(f"⏱️  Total processing time: {elapsed:.2f} seconds.")
-#     log_step("Total processing", f"Completed in {elapsed:.2f} seconds")
-
-
-# if __name__ == "__main__":
-#     if not INPUT_PATH.exists():
-#         print(f"❌ File {INPUT_PATH} not found.")
-#         log_step("File check", "Failed: File not found")
-#     else:
-#         process_with_pandas()
-
-# gravação em parquet, acima, comente em csv
-import pandas as pd
-from pathlib import Path
 import time
-import datetime
-from csv import writer
+from pathlib import Path
 
-# Paths and constants
-BASE_DIR = Path(__file__).resolve().parent.parent
-INPUT_PATH = BASE_DIR / "data" / "weather_stations.csv"
-OUTPUT_PATH = BASE_DIR / "data" / "measurements_pandas.csv"
-OUTPUT_PARQUET = BASE_DIR / "data" / "measurements_pandas.parquet"
-LOG_PATH = BASE_DIR / "logs" / "log_pandas.csv"
+import pandas as pd
 
-# Ensure directories exist
-LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+try:
+    from src.etl_utils import (
+        INPUT_PATH,
+        PROJECT_ROOT,
+        log_step as append_log,
+        write_results_csv,
+    )
+except ModuleNotFoundError:  # pragma: no cover - direct CLI compatibility.
+    from etl_utils import (  # type: ignore[no-redef]
+        INPUT_PATH,
+        PROJECT_ROOT,
+        log_step as append_log,
+        write_results_csv,
+    )
+
+OUTPUT_CSV_PATH = PROJECT_ROOT / "data" / "measurements_pandas.csv"
+OUTPUT_PARQUET_PATH = OUTPUT_CSV_PATH.with_suffix(".parquet")
+LOG_PATH = PROJECT_ROOT / "logs" / "log_pandas.csv"
 
 
 def log_step(step: str, status: str) -> None:
-    with LOG_PATH.open("a", newline="") as log_file:
-        log_writer = writer(log_file)
-        timestamp = datetime.datetime.now().isoformat()
-        if status.lower().startswith("success") or status.lower().startswith(
-            "completed"
-        ):
-            status = "✅ " + status
-        log_writer.writerow([timestamp, step, status])
+    """Append a step to this implementation's log."""
+
+    append_log(LOG_PATH, step, status)
 
 
-def process_with_pandas():
-    print("Starting ETL with pandas...")
-    start_time = time.time()
+def load_measurements(path: Path) -> pd.DataFrame:
+    """Load the headerless challenge CSV and discard invalid rows."""
 
-    try:
-        df = pd.read_csv(
-            INPUT_PATH,
-            sep=";",
-            names=["station", "temperature"],
-            dtype={"station": str, "temperature": float},
-            skiprows=1,
+    frame = pd.read_csv(
+        path,
+        sep=";",
+        header=None,
+        names=["station", "temperature"],
+        comment="#",
+        dtype={"station": "string"},
+        on_bad_lines="skip",
+    )
+    frame["station"] = frame["station"].str.strip()
+    frame["temperature"] = pd.to_numeric(frame["temperature"], errors="coerce")
+    frame = frame.dropna(subset=["station", "temperature"])
+    return frame[frame["station"] != ""]
+
+
+def aggregate(frame: pd.DataFrame) -> pd.DataFrame:
+    """Calculate sorted, two-decimal statistics per station."""
+
+    result = (
+        frame.groupby("station", sort=True, as_index=False)["temperature"]
+        .agg(min="min", mean="mean", max="max")
+        .round({"min": 2, "mean": 2, "max": 2})
+    )
+    return result
+
+
+def process_with_pandas(
+    input_path: Path = INPUT_PATH,
+    output_csv: Path = OUTPUT_CSV_PATH,
+    output_parquet: Path = OUTPUT_PARQUET_PATH,
+) -> int:
+    """Run the pandas pipeline and return the number of stations."""
+
+    start_time = time.perf_counter()
+    frame = load_measurements(input_path)
+    log_step("Read input", f"Success: {len(frame):,} valid rows")
+
+    results = aggregate(frame)
+    output_rows = results.to_dict(orient="records")
+    write_results_csv(output_rows, output_csv)  # type: ignore[arg-type]
+    output_parquet.parent.mkdir(parents=True, exist_ok=True)
+    results.to_parquet(output_parquet, index=False)
+
+    elapsed = time.perf_counter() - start_time
+    log_step("Pipeline", f"Success: {len(results)} stations in {elapsed:.2f} seconds")
+    print(
+        f"Pandas pipeline completed: {len(results)} stations in "
+        f"{elapsed:.2f} seconds."
+    )
+    return len(results)
+
+
+def main() -> None:
+    """Run the pandas implementation from the command line."""
+
+    if not INPUT_PATH.exists():
+        raise FileNotFoundError(
+            f"Input file not found: {INPUT_PATH}. Generate it first."
         )
-        log_step("Read CSV", f"Success: {len(df)} rows loaded")
-        print(f"✅ CSV read successfully: {len(df)} rows loaded.")
-    except Exception as e:
-        log_step("Read CSV", f"Failed: {e}")
-        print(f"❌ Failed to read CSV: {e}")
-        return
-
-    try:
-        df_kpi = (
-            df.groupby("station")["temperature"]
-            .agg(["min", "mean", "max"])
-            .reset_index()
-        )
-        log_step("Aggregate stats", f"Success: {len(df_kpi)} stations processed")
-        print(f"✅ Statistics calculated successfully: {len(df_kpi)} stations.")
-    except Exception as e:
-        log_step("Aggregate stats", f"Failed: {e}")
-        print(f"❌ Failed to calculate statistics: {e}")
-        return
-
-    try:
-        df_sorted = df_kpi.sort_values("station")
-
-        # Formatando com duas casas decimais como string
-        df_sorted["min"] = df_sorted["min"].map("{:.2f}".format)
-        df_sorted["mean"] = df_sorted["mean"].map("{:.2f}".format)
-        df_sorted["max"] = df_sorted["max"].map("{:.2f}".format)
-
-        df_sorted.to_csv(OUTPUT_PATH, index=False, sep=";")
-        log_step("Save CSV", "Success")
-        print(f"✅ Results saved to: {OUTPUT_PATH}")
-    except Exception as e:
-        log_step("Save CSV", f"Failed: {e}")
-        print(f"❌ Failed to save CSV: {e}")
-        return
-
-    # Linha separadora no log
-    log_step("-----", "-----")
-
-    try:
-        df_sorted.to_parquet(OUTPUT_PARQUET, index=False)
-        log_step("Save Parquet", "Success")
-        print(f"✅ Results saved to: {OUTPUT_PARQUET}")
-    except Exception as e:
-        log_step("Save Parquet", f"Failed: {e}")
-        print(f"❌ Failed to save Parquet: {e}")
-        return
-
-    elapsed = time.time() - start_time
-    print(f"⏱️  Total processing time: {elapsed:.2f} seconds.")
-    log_step("Total processing", f"Completed in {elapsed:.2f} seconds")
+    process_with_pandas()
 
 
 if __name__ == "__main__":
-    if not INPUT_PATH.exists():
-        print(f"❌ File {INPUT_PATH} not found.")
-        log_step("File check", "Failed: File not found")
-    else:
-        process_with_pandas()
+    main()

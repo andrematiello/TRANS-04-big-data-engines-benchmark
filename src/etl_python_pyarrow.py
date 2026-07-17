@@ -1,166 +1,120 @@
-from csv import reader, writer
-from collections import defaultdict
-from pathlib import Path
-from typing import Dict
+"""Streaming aggregation with PyArrow output."""
+
+from __future__ import annotations
+
 import time
-import datetime
+from pathlib import Path
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-# 📁 Caminhos principais
-BASE_DIR = Path(__file__).resolve().parent.parent
-PATH_CSV = BASE_DIR / "data" / "weather_stations.csv"  # Caminho do CSV de entrada
-LOG_PATH = BASE_DIR / "logs" / "log_pyarrow.csv"  # Caminho do log
-OUTPUT_CSV_PATH = (
-    BASE_DIR / "data" / "measurements.pyarrow.csv"
-)  # Caminho do CSV de saída
-OUTPUT_PARQUET_PATH = OUTPUT_CSV_PATH.with_suffix(
-    ".parquet"
-)  # Caminho do Parquet de saída
+try:
+    from src.etl_utils import (
+        INPUT_PATH,
+        PROJECT_ROOT,
+        ResultRow,
+        StationStats,
+        aggregate_measurements,
+        finalize_stats,
+        log_step as append_log,
+        write_results_csv,
+    )
+except ModuleNotFoundError:  # pragma: no cover - direct CLI compatibility.
+    from etl_utils import (  # type: ignore[no-redef]
+        INPUT_PATH,
+        PROJECT_ROOT,
+        ResultRow,
+        StationStats,
+        aggregate_measurements,
+        finalize_stats,
+        log_step as append_log,
+        write_results_csv,
+    )
 
-# 🛠️ Garante que os diretórios existem
-LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-OUTPUT_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-# 📝 Log incremental
+LOG_PATH = PROJECT_ROOT / "logs" / "log_pyarrow.csv"
+OUTPUT_CSV_PATH = PROJECT_ROOT / "data" / "measurements_pyarrow.csv"
+OUTPUT_PARQUET_PATH = OUTPUT_CSV_PATH.with_suffix(".parquet")
 
 
 def log_step(step: str, status: str) -> None:
-    try:
-        with LOG_PATH.open("a", newline="") as log_file:
-            log_writer = writer(log_file)
-            timestamp = datetime.datetime.now().isoformat()
-            if status.lower().startswith("success") or status.lower().startswith(
-                "completed"
-            ):
-                status = "✅ " + status
-            log_writer.writerow([timestamp, step, status])
-    except Exception as e:
-        print(f"[LOG ERROR] Failed to write log: {e}")
+    """Append a step to this implementation's log."""
+
+    append_log(LOG_PATH, step, status)
 
 
-# 📥 Lê CSV e realiza agregação incremental
+def read_and_aggregate(
+    path_to_csv: Path = INPUT_PATH,
+) -> tuple[dict[str, StationStats], int, int]:
+    """Aggregate input rows with a streaming CSV reader."""
 
-
-def read_and_aggregate(path_to_csv: Path) -> Dict[str, Dict[str, float]]:
-    stats = defaultdict(
-        lambda: {"min": float("inf"), "max": float("-inf"), "sum": 0.0, "count": 0}
+    stats, rows_seen, invalid_rows = aggregate_measurements(path_to_csv)
+    log_step(
+        "Read and aggregate",
+        f"Success: {len(stats)} stations from {rows_seen:,} rows; "
+        f"{invalid_rows:,} invalid rows skipped",
     )
-    row_count = 0
-    try:
-        with path_to_csv.open("r", encoding="utf-8") as file:
-            csv_reader = reader(file, delimiter=";")
-            for row in csv_reader:
-                row_count += 1
-                if row_count % 50_000_000 == 0:
-                    print(f"[DEBUG] Processed {row_count:,} lines...")
-                if len(row) != 2:
-                    continue
-                try:
-                    station = row[0]
-                    temp = float(row[1])
-                    s = stats[station]
-                    s["min"] = min(s["min"], temp)
-                    s["max"] = max(s["max"], temp)
-                    s["sum"] += temp
-                    s["count"] += 1
-                except ValueError:
-                    continue
-        log_step(
-            "Read and aggregate",
-            f"Success: {len(stats)} stations from {row_count} lines",
+    return stats, rows_seen, invalid_rows
+
+
+def format_results(stats: dict[str, StationStats]) -> list[ResultRow]:
+    """Return sorted numeric results rounded to two decimal places."""
+
+    results = finalize_stats(stats)
+    log_step("Format results", f"Success: {len(results)} stations")
+    return results
+
+
+def save_results_to_csv(
+    results: list[ResultRow],
+    path: Path = OUTPUT_CSV_PATH,
+) -> None:
+    """Write results to the challenge-compatible CSV format."""
+
+    write_results_csv(results, path)
+    log_step("Save results (CSV)", "Success")
+
+
+def save_results_to_parquet(
+    results: list[ResultRow],
+    path: Path = OUTPUT_PARQUET_PATH,
+) -> None:
+    """Write numeric result columns to Parquet with PyArrow."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.Table.from_pylist(results), path)
+    log_step("Save results (Parquet)", "Success")
+
+
+def process_temperatures(
+    input_path: Path = INPUT_PATH,
+    output_csv: Path = OUTPUT_CSV_PATH,
+    output_parquet: Path = OUTPUT_PARQUET_PATH,
+) -> int:
+    """Run the PyArrow implementation and return station count."""
+
+    start_time = time.perf_counter()
+    stats, _, _ = read_and_aggregate(input_path)
+    results = format_results(stats)
+    save_results_to_csv(results, output_csv)
+    save_results_to_parquet(results, output_parquet)
+    elapsed = time.perf_counter() - start_time
+    log_step("Pipeline", f"Completed in {elapsed:.2f} seconds")
+    print(
+        f"PyArrow pipeline completed: {len(results)} stations in "
+        f"{elapsed:.2f} seconds."
+    )
+    return len(results)
+
+
+def main() -> None:
+    """Run the PyArrow implementation from the command line."""
+
+    if not INPUT_PATH.exists():
+        raise FileNotFoundError(
+            f"Input file not found: {INPUT_PATH}. Generate it first."
         )
-        print(f"✅ Aggregated {row_count:,} rows from {len(stats)} stations.")
-    except Exception as e:
-        log_step("Read and aggregate", f"Failed: {e}")
-        raise
-    return stats
+    process_temperatures()
 
 
-# 🎯 Formata os dados (duas casas decimais e ordenação alfabética)
-
-
-def format_results(stats: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, str]]:
-    formatted = {}
-    for station, values in stats.items():
-        mean = values["sum"] / values["count"] if values["count"] else 0
-        formatted[station] = {
-            "min": f"{values['min']:.2f}",
-            "mean": f"{mean:.2f}",
-            "max": f"{values['max']:.2f}",
-        }
-    formatted = dict(sorted(formatted.items()))
-    log_step("Format results", f"Success: {len(formatted)} stations")
-    print(f"✅ Results formatted: {len(formatted)} stations.")
-    return formatted
-
-
-# 💾 Salva em CSV
-
-
-def save_results_to_csv(results: Dict[str, Dict[str, str]], path: Path) -> None:
-    try:
-        with path.open("w", encoding="utf-8") as f:
-            f.write("station;min;mean;max\n")
-            for station, data in results.items():
-                f.write(f"{station};{data['min']};{data['mean']};{data['max']}\n")
-        log_step("Save results (CSV)", "Success")
-        print(f"✅ Results saved to {path}")
-    except Exception as e:
-        log_step("Save results (CSV)", f"Failed: {e}")
-        print(f"❌ Failed to save CSV: {e}")
-
-
-# 📦 Salva em Parquet com pyarrow
-
-
-def save_results_to_parquet(results: Dict[str, Dict[str, str]], path: Path) -> None:
-    try:
-        table = pa.table(
-            {
-                "station": list(results.keys()),
-                "min": [v["min"] for v in results.values()],
-                "mean": [v["mean"] for v in results.values()],
-                "max": [v["max"] for v in results.values()],
-            }
-        )
-        pq.write_table(table, path)
-        log_step("Save results (Parquet)", "Success")
-        print(f"✅ Results saved to {path}")
-    except Exception as e:
-        log_step("Save results (Parquet)", f"Failed: {e}")
-        print(f"❌ Failed to save Parquet: {e}")
-
-
-# 🔁 Pipeline principal
-
-
-def process_temperatures():
-    print("🚀 Starting temperature processing from CSV file...")
-    start = time.time()
-    stats = read_and_aggregate(PATH_CSV)
-    formatted = format_results(stats)
-    save_results_to_csv(formatted, OUTPUT_CSV_PATH)
-    save_results_to_parquet(formatted, OUTPUT_PARQUET_PATH)
-    elapsed = time.time() - start
-    print(f"⏱️  Total processing completed in {elapsed:.2f} seconds.")
-    log_step("⏱️  Total processing", f"Completed in {elapsed:.2f} seconds")
-
-
-# ▶️ Execução
 if __name__ == "__main__":
-    print(f"[DEBUG] BASE_DIR: {BASE_DIR}")
-    print(f"[DEBUG] PATH_CSV: {PATH_CSV}")
-    print(f"[DEBUG] LOG_PATH: {LOG_PATH}")
-    print(f"[DEBUG] OUTPUT_CSV_PATH: {OUTPUT_CSV_PATH}")
-    print(f"[DEBUG] OUTPUT_PARQUET_PATH: {OUTPUT_PARQUET_PATH}")
-
-    if not PATH_CSV.exists():
-        print(f"❌ File {PATH_CSV} not found.")
-        log_step("File check", "Failed: File not found")
-    else:
-        try:
-            process_temperatures()
-        except Exception as e:
-            print(f"❌ Processing failed: {e}")
-            log_step("Process temperatures", f"Failed: {e}")
+    main()

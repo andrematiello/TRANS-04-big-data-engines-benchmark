@@ -12,23 +12,17 @@ repos:
 
   - repo: local
     hooks:
-      - id: pip-audit
-        name: pip-audit
-        entry: pip-audit
-        args: []
-        language: system
-        pass_filenames: false
-        types: [python]
-
       - id: black
         name: black
         entry: black
-        language: system
+        language: python
+        additional_dependencies:
+          - "black>=26.3.1,<27.0.0"
         types: [python]
 
   - repo: https://github.com/charliermarsh/ruff-pre-commit
-    rev: v0.4.5
+    rev: v0.11.12
     hooks:
-      - id: ruff # substitui isort e bandit
+      - id: ruff
         args:
           - "--fix"

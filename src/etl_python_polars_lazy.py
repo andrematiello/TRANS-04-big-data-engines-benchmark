@@ -1,4 +1,4 @@
-"""Full-file aggregation using Polars."""
+"""Lazy and streaming aggregation using Polars."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - direct CLI compatibility.
     from etl_utils import INPUT_PATH, PROJECT_ROOT, log_step as append_log  # type: ignore[no-redef]
 
-LOG_PATH = PROJECT_ROOT / "logs" / "log_polars.csv"
-OUTPUT_CSV_PATH = PROJECT_ROOT / "data" / "measurements_polars.csv"
+LOG_PATH = PROJECT_ROOT / "logs" / "log_polars_lazy.csv"
+OUTPUT_CSV_PATH = PROJECT_ROOT / "data" / "measurements_polars_lazy.csv"
 OUTPUT_PARQUET_PATH = OUTPUT_CSV_PATH.with_suffix(".parquet")
 
 
@@ -23,22 +23,25 @@ def log_step(step: str, status: str) -> None:
     append_log(LOG_PATH, step, status)
 
 
-def read_and_aggregate_with_polars(path_to_csv: Path = INPUT_PATH) -> pl.DataFrame:
-    """Read the headerless input and calculate sorted station statistics."""
+def read_and_aggregate_with_polars_lazy(
+    path_to_csv: Path = INPUT_PATH,
+) -> pl.DataFrame:
+    """Build and execute a streaming lazy aggregation plan."""
 
-    frame = pl.read_csv(
-        path_to_csv,
-        separator=";",
-        has_header=False,
-        new_columns=["station", "temperature"],
-        comment_prefix="#",
-        ignore_errors=True,
-    ).with_columns(
-        pl.col("station").cast(pl.String).str.strip_chars(),
-        pl.col("temperature").cast(pl.Float64, strict=False),
-    )
-    result = (
-        frame.drop_nulls(["station", "temperature"])
+    plan = (
+        pl.scan_csv(
+            path_to_csv,
+            separator=";",
+            has_header=False,
+            new_columns=["station", "temperature"],
+            comment_prefix="#",
+            ignore_errors=True,
+        )
+        .with_columns(
+            pl.col("station").cast(pl.String).str.strip_chars(),
+            pl.col("temperature").cast(pl.Float64, strict=False),
+        )
+        .drop_nulls(["station", "temperature"])
         .filter(pl.col("station") != "")
         .group_by("station")
         .agg(
@@ -53,8 +56,12 @@ def read_and_aggregate_with_polars(path_to_csv: Path = INPUT_PATH) -> pl.DataFra
             pl.col("max").round(2),
         )
     )
-    log_step("Read and aggregate", f"Success: {result.height} stations")
-    return result
+    try:
+        frame = plan.collect(engine="streaming")
+    except TypeError:  # Compatibility with older Polars releases.
+        frame = plan.collect(streaming=True)
+    log_step("Read and aggregate", f"Success: {frame.height} stations")
+    return frame
 
 
 def save_results(
@@ -71,33 +78,33 @@ def save_results(
     log_step("Save results", f"Success: {frame.height} stations")
 
 
-def process_with_polars(
+def process_with_polars_lazy(
     input_path: Path = INPUT_PATH,
     output_csv: Path = OUTPUT_CSV_PATH,
     output_parquet: Path = OUTPUT_PARQUET_PATH,
 ) -> int:
-    """Run the eager Polars pipeline and return station count."""
+    """Run the lazy Polars pipeline and return station count."""
 
     start_time = time.perf_counter()
-    frame = read_and_aggregate_with_polars(input_path)
+    frame = read_and_aggregate_with_polars_lazy(input_path)
     save_results(frame, output_csv, output_parquet)
     elapsed = time.perf_counter() - start_time
     log_step("Pipeline", f"Completed in {elapsed:.2f} seconds")
     print(
-        f"Polars pipeline completed: {frame.height} stations in "
+        f"Polars lazy pipeline completed: {frame.height} stations in "
         f"{elapsed:.2f} seconds."
     )
     return frame.height
 
 
 def main() -> None:
-    """Run the Polars implementation from the command line."""
+    """Run the lazy Polars implementation from the command line."""
 
     if not INPUT_PATH.exists():
         raise FileNotFoundError(
             f"Input file not found: {INPUT_PATH}. Generate it first."
         )
-    process_with_polars()
+    process_with_polars_lazy()
 
 
 if __name__ == "__main__":

@@ -1,127 +1,127 @@
-from csv import reader, writer
-from collections import defaultdict
-from pathlib import Path
+"""Two-pass streaming aggregation using the Python standard library."""
+
+from __future__ import annotations
+
+import csv
 import time
-import datetime
+from pathlib import Path
+
 import pandas as pd
 
-# 📁 Caminhos principais
-BASE_DIR = Path(__file__).resolve().parent.parent
-PATH_CSV = BASE_DIR / "data" / "weather_stations.csv"
-INTERMEDIATE_PATH = BASE_DIR / "data" / "intermediate_stats.csv"
-OUTPUT_CSV_PATH = BASE_DIR / "data" / "measurements_python.csv"
-OUTPUT_PARQUET_PATH = OUTPUT_CSV_PATH.with_suffix(".parquet")
-LOG_PATH = BASE_DIR / "logs" / "log_python.csv"
-
-# 🛠️ Garante que os diretórios existem
-LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-OUTPUT_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-
-# 📝 Log incremental
-def log_step(step: str, status: str) -> None:
-    try:
-        with LOG_PATH.open("a", newline="") as log_file:
-            log_writer = writer(log_file)
-            timestamp = datetime.datetime.now().isoformat()
-            if status.lower().startswith("success") or status.lower().startswith(
-                "completed"
-            ):
-                status = "✅ " + status
-            log_writer.writerow([timestamp, step, status])
-    except Exception as e:
-        print(f"[LOG ERROR] Failed to write log: {e}")
-
-
-# 🔁 Passo 1: Agregação incremental (sem listas)
-def first_pass_aggregate(path_to_csv: Path, intermediate_path: Path):
-    station_stats = defaultdict(
-        lambda: {"sum": 0.0, "count": 0, "min": float("inf"), "max": float("-inf")}
+try:  # Supports both ``python -m src.etl_python`` and direct script execution.
+    from src.etl_utils import (
+        INPUT_PATH,
+        PROJECT_ROOT,
+        aggregate_measurements,
+        finalize_stats,
+        log_step as append_log,
+        write_results_csv,
     )
-    row_count = 0
+except ModuleNotFoundError:  # pragma: no cover - exercised by direct CLI use.
+    from etl_utils import (  # type: ignore[no-redef]
+        INPUT_PATH,
+        PROJECT_ROOT,
+        aggregate_measurements,
+        finalize_stats,
+        log_step as append_log,
+        write_results_csv,
+    )
 
-    try:
-        with path_to_csv.open("r", encoding="utf-8") as file:
-            csv_reader = reader(file, delimiter=";")
-            for row in csv_reader:
-                row_count += 1
-                if row_count % 50_000_000 == 0:
-                    print(f"[DEBUG] Processed {row_count:,} lines...")
-
-                if len(row) != 2:
-                    continue
-                try:
-                    station = str(row[0])
-                    temp = float(row[1])
-                    stats = station_stats[station]
-                    stats["sum"] += temp
-                    stats["count"] += 1
-                    stats["min"] = min(stats["min"], temp)
-                    stats["max"] = max(stats["max"], temp)
-                except ValueError:
-                    continue
-
-        with intermediate_path.open("w", encoding="utf-8") as f:
-            f.write("station;sum;count;min;max\n")
-            for station, stats in station_stats.items():
-                line = f"{station};{stats['sum']};{stats['count']};{stats['min']};{stats['max']}\n"
-                f.write(line)
-
-        log_step(
-            "First pass aggregation",
-            f"Success: {len(station_stats)} stations from {row_count} lines",
-        )
-        print(f"✅ First pass complete: {row_count:,} lines processed.")
-    except Exception as e:
-        log_step("First pass aggregation", f"Failed: {e}")
-        raise
+INTERMEDIATE_PATH = PROJECT_ROOT / "data" / "intermediate_stats.csv"
+OUTPUT_CSV_PATH = PROJECT_ROOT / "data" / "measurements_python.csv"
+OUTPUT_PARQUET_PATH = OUTPUT_CSV_PATH.with_suffix(".parquet")
+LOG_PATH = PROJECT_ROOT / "logs" / "log_python.csv"
 
 
-# 🧮 Passo 2: Cálculo final e exportação
+def log_step(step: str, status: str) -> None:
+    """Append a step to this implementation's log."""
+
+    append_log(LOG_PATH, step, status)
+
+
+def first_pass_aggregate(
+    path_to_csv: Path = INPUT_PATH,
+    intermediate_path: Path = INTERMEDIATE_PATH,
+) -> int:
+    """Aggregate input rows and persist compact intermediate statistics."""
+
+    stats, rows_seen, invalid_rows = aggregate_measurements(path_to_csv)
+    intermediate_path.parent.mkdir(parents=True, exist_ok=True)
+    with intermediate_path.open("w", encoding="utf-8", newline="") as output_file:
+        output = csv.writer(output_file, delimiter=";", lineterminator="\n")
+        output.writerow(["station", "total", "count", "min", "max"])
+        for station in sorted(stats):
+            values = stats[station]
+            output.writerow(
+                [
+                    station,
+                    values["total"],
+                    values["count"],
+                    values["minimum"],
+                    values["maximum"],
+                ]
+            )
+    log_step(
+        "First-pass aggregation",
+        f"Success: {len(stats)} stations from {rows_seen:,} rows; "
+        f"{invalid_rows:,} invalid rows skipped",
+    )
+    return len(stats)
+
+
 def second_pass_compute(
-    intermediate_path: Path, output_csv: Path, output_parquet: Path
-):
-    try:
-        df = pd.read_csv(intermediate_path, sep=";")
-        df["mean"] = df["sum"] / df["count"]
-        df = df[["station", "min", "mean", "max"]]
-        df = df.sort_values("station")
-        df.to_csv(output_csv, sep=";", index=False)
-        df.to_parquet(output_parquet, index=False)
-        log_step("Second pass compute", "Success")
-        print("✅ Final results saved to CSV and Parquet.")
-    except Exception as e:
-        log_step("Second pass compute", f"Failed: {e}")
-        print(f"❌ Failed to compute final stats: {e}")
+    intermediate_path: Path = INTERMEDIATE_PATH,
+    output_csv: Path = OUTPUT_CSV_PATH,
+    output_parquet: Path = OUTPUT_PARQUET_PATH,
+) -> int:
+    """Compute means from intermediate totals and write both output formats."""
+
+    stats = {}
+    with intermediate_path.open("r", encoding="utf-8", newline="") as input_file:
+        for row in csv.DictReader(input_file, delimiter=";"):
+            stats[row["station"]] = {
+                "total": float(row["total"]),
+                "count": int(row["count"]),
+                "minimum": float(row["min"]),
+                "maximum": float(row["max"]),
+            }
+
+    results = finalize_stats(stats)
+    write_results_csv(results, output_csv)
+    pd.DataFrame(results).to_parquet(output_parquet, index=False)
+    log_step("Second-pass output", f"Success: {len(results)} stations written")
+    return len(results)
 
 
-# 🔁 Execução completa
-def process_temperatures():
-    print("🚀 Starting 2-pass processing for massive CSV...")
-    start_time = time.time()
+def process_temperatures(
+    path_to_csv: Path = INPUT_PATH,
+    output_csv: Path = OUTPUT_CSV_PATH,
+    output_parquet: Path = OUTPUT_PARQUET_PATH,
+    intermediate_path: Path = INTERMEDIATE_PATH,
+) -> int:
+    """Run the complete two-pass pipeline and return station count."""
 
-    first_pass_aggregate(PATH_CSV, INTERMEDIATE_PATH)
-    second_pass_compute(INTERMEDIATE_PATH, OUTPUT_CSV_PATH, OUTPUT_PARQUET_PATH)
+    start_time = time.perf_counter()
+    first_pass_aggregate(path_to_csv, intermediate_path)
+    station_count = second_pass_compute(intermediate_path, output_csv, output_parquet)
+    elapsed = time.perf_counter() - start_time
+    log_step("Pipeline", f"Completed in {elapsed:.2f} seconds")
+    print(
+        f"Python two-pass pipeline completed: {station_count} stations in "
+        f"{elapsed:.2f} seconds."
+    )
+    return station_count
 
-    elapsed = time.time() - start_time
-    print(f"⏱️  Total processing completed in {elapsed:.2f} seconds.")
-    log_step("⏱️  Total processing", f"Completed in {elapsed:.2f} seconds")
+
+def main() -> None:
+    """Run the standard-library implementation from the command line."""
+
+    if not INPUT_PATH.exists():
+        raise FileNotFoundError(
+            f"Input file not found: {INPUT_PATH}. Generate it first."
+        )
+    process_temperatures()
 
 
-# ▶️ Execução principal
 if __name__ == "__main__":
-    print(f"[DEBUG] BASE_DIR: {BASE_DIR}")
-    print(f"[DEBUG] PATH_CSV: {PATH_CSV}")
-    print(f"[DEBUG] LOG_PATH: {LOG_PATH}")
-    print(f"[DEBUG] OUTPUT_CSV_PATH: {OUTPUT_CSV_PATH}")
-    print(f"[DEBUG] OUTPUT_PARQUET_PATH: {OUTPUT_PARQUET_PATH}")
-
-    if not PATH_CSV.exists():
-        print(f"❌ File {PATH_CSV} not found.")
-        log_step("File check", "Failed: File not found")
-    else:
-        try:
-            process_temperatures()
-        except Exception as e:
-            print(f"❌ Processing failed: {e}")
-            log_step("Process temperatures", f"Failed: {e}")
+    main()

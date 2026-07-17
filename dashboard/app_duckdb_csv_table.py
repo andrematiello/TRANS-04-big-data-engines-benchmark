@@ -1,188 +1,115 @@
-# import streamlit as st
-# import pandas as pd
-# from pathlib import Path
-# import plotly.express as px
+"""Streamlit dashboard for the station metrics mart."""
 
-# # 📂 Caminho do arquivo CSV
-# csv_path = Path(__file__).resolve().parent.parent / "data" / "station_metrics_mart.csv"
+from __future__ import annotations
 
-# # 🧱 Título da página
-# st.title("📊 Tabela de Medidas - DuckDB")
-
-# # ✅ Verificação de existência do arquivo
-# if not csv_path.exists():
-#     st.error(f"❌ Arquivo não encontrado: {csv_path}")
-# else:
-#     # 🚑 Leitura do CSV com tratamento de erro
-#     try:
-#         df = pd.read_csv(csv_path, sep=";", nrows=1000)  # nrows temporário para teste
-#         st.success("✅ CSV carregado com sucesso!")
-#     except Exception as e:
-#         st.error(f"❌ Erro ao ler o CSV: {e}")
-#         st.stop()
-
-#     # 📋 Tabela interativa com os dados
-#     st.subheader("📋 Tabela com Estatísticas por Estação")
-#     st.dataframe(df, use_container_width=True)
-
-#     # 📈 Gráfico — Temperatura Média
-#     st.subheader("📈 Temperatura Média por Estação")
-#     fig_mean = px.bar(
-#         df,
-#         x="Station",
-#         y="Average Temperature (°C)",
-#         title="Temperatura Média por Estação",
-#         labels={"Average Temperature (°C)": "Temperatura Média (°C)"},
-#     )
-#     st.plotly_chart(fig_mean, use_container_width=True)
-
-#     # 🌡️ Gráfico — Temperatura Mínima
-#     st.subheader("🌡️ Temperatura Mínima por Estação")
-#     fig_min = px.bar(
-#         df,
-#         x="Station",
-#         y="Min Temperature (°C)",
-#         title="Temperatura Mínima por Estação",
-#         labels={"Min Temperature (°C)": "Temp. Mínima (°C)"},
-#         color="Min Temperature (°C)",
-#         color_continuous_scale="blues",
-#     )
-#     st.plotly_chart(fig_min, use_container_width=True)
-
-#     # 🔥 Gráfico — Temperatura Máxima
-#     st.subheader("🔥 Temperatura Máxima por Estação")
-#     fig_max = px.bar(
-#         df,
-#         x="Station",
-#         y="Max Temperature (°C)",
-#         title="Temperatura Máxima por Estação",
-#         labels={"Max Temperature (°C)": "Temp. Máxima (°C)"},
-#         color="Max Temperature (°C)",
-#         color_continuous_scale="reds",
-#     )
-#     st.plotly_chart(fig_max, use_container_width=True)
-
-# dashboard/app_duckdb_csv_table.py
-
-import streamlit as st
-import pandas as pd
-import plotly.express as px
 from pathlib import Path
 
-# Caminho do arquivo CSV
-csv_path = Path(__file__).resolve().parent.parent / "data" / "station_metrics_mart.csv"
+import pandas as pd
+import plotly.express as px
+import streamlit as st
 
-# Título principal
-st.set_page_config(page_title="Dashboard de Estações", layout="wide")
-st.title("📊 Tabela de Medidas - DuckDB")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+MART_PATH = PROJECT_ROOT / "data" / "station_metrics_mart.csv"
+
+st.set_page_config(page_title="Weather Station Metrics", layout="wide")
+st.title("Weather Station Metrics")
+st.caption("Interactive view of the DuckDB-generated station metrics mart.")
 
 
-# Lê o CSV com cache para otimizar desempenho
 @st.cache_data
-def load_data(path):
+def load_data(path: Path) -> pd.DataFrame:
+    """Load the dashboard mart with a semicolon delimiter."""
+
     return pd.read_csv(path, sep=";")
 
 
-# Verifica se arquivo existe e carrega dados
-if not csv_path.exists():
-    st.error(f"❌ Arquivo não encontrado: {csv_path}")
+if not MART_PATH.exists():
+    st.error(
+        "The dashboard data is missing. Run the DuckDB pipeline and then "
+        "create_station_metrics_mart.py first."
+    )
     st.stop()
 
 try:
-    df = load_data(csv_path)
-except Exception as e:
-    st.error(f"❌ Erro ao ler o CSV: {e}")
+    data = load_data(MART_PATH)
+except (OSError, ValueError, pd.errors.ParserError) as error:
+    st.error(f"Unable to load the dashboard data: {error}")
     st.stop()
 
-# Filtro por estação
-station_options = ["Todas"] + sorted(df["Station"].unique().tolist())
-selected_station = st.selectbox("🔎 Selecione uma estação:", station_options)
+if data.empty:
+    st.warning("The dashboard data contains no records.")
+    st.stop()
 
-if selected_station != "Todas":
-    df_filtered = df[df["Station"] == selected_station]
-else:
-    df_filtered = df
-
-# Métricas resumo (linha com 3 colunas)
-col1, col2, col3 = st.columns(3)
-col1.metric("🌡️ Média Geral", f"{df_filtered['Average Temperature (°C)'].mean():.2f} °C")
-col2.metric("🔥 Máxima Geral", f"{df_filtered['Max Temperature (°C)'].max():.2f} °C")
-col3.metric("❄️ Mínima Geral", f"{df_filtered['Min Temperature (°C)'].min():.2f} °C")
-
-# Exibe tabela interativa
-st.subheader("📋 Tabela com Estatísticas por Estação")
-st.dataframe(df_filtered, use_container_width=True)
-
-# Gráfico 1 — Temperatura média
-st.subheader("📈 Temperatura Média por Estação")
-fig_mean = px.bar(
-    df_filtered,
-    x="Station",
-    y="Average Temperature (°C)",
-    title="Temperatura Média por Estação",
-    labels={"Average Temperature (°C)": "Temperatura Média (°C)"},
+station_options = ["All stations", *sorted(data["Station"].dropna().unique())]
+selected_station = st.selectbox("Filter by station", station_options)
+filtered_data = (
+    data
+    if selected_station == "All stations"
+    else data[data["Station"] == selected_station]
 )
-st.plotly_chart(fig_mean, use_container_width=True)
 
-# Gráfico 2 — Temperatura mínima
-st.subheader("🌡️ Temperatura Mínima por Estação")
-fig_min = px.bar(
-    df_filtered,
-    x="Station",
-    y="Min Temperature (°C)",
-    title="Temperatura Mínima por Estação",
-    labels={"Min Temperature (°C)": "Temp. Mínima (°C)"},
-    color="Min Temperature (°C)",
-    color_continuous_scale="blues",
-)
-st.plotly_chart(fig_min, use_container_width=True)
+minimum = filtered_data["Min Temperature (°C)"].min()
+average = filtered_data["Average Temperature (°C)"].mean()
+maximum = filtered_data["Max Temperature (°C)"].max()
+metric_columns = st.columns(3)
+metric_columns[0].metric("Minimum temperature", f"{minimum:.2f} °C")
+metric_columns[1].metric("Average temperature", f"{average:.2f} °C")
+metric_columns[2].metric("Maximum temperature", f"{maximum:.2f} °C")
 
-# Gráfico 3 — Temperatura máxima
-st.subheader("🔥 Temperatura Máxima por Estação")
-fig_max = px.bar(
-    df_filtered,
-    x="Station",
-    y="Max Temperature (°C)",
-    title="Temperatura Máxima por Estação",
-    labels={"Max Temperature (°C)": "Temp. Máxima (°C)"},
-    color="Max Temperature (°C)",
-    color_continuous_scale="reds",
-)
-st.plotly_chart(fig_max, use_container_width=True)
+st.subheader("Station statistics")
+st.dataframe(filtered_data, use_container_width=True, hide_index=True)
 
-# Gráfico 4 — Dispersão temperatura mínima vs máxima
-st.subheader("📍 Dispersão: Temperaturas Mínima vs Máxima")
-fig_scatter = px.scatter(
-    df_filtered,
-    x="Min Temperature (°C)",
-    y="Max Temperature (°C)",
-    size=df_filtered["Average Temperature (°C)"].abs(),  # <- aqui está a correção
-    hover_name="Station",
-    title="Relação entre Temp. Mínima e Máxima",
-    labels={
-        "Min Temperature (°C)": "Temp. Mínima (°C)",
-        "Max Temperature (°C)": "Temp. Máxima (°C)",
-    },
+st.subheader("Average temperature by station")
+st.plotly_chart(
+    px.bar(
+        filtered_data,
+        x="Station",
+        y="Average Temperature (°C)",
+        labels={"Average Temperature (°C)": "Average temperature (°C)"},
+    ),
+    use_container_width=True,
 )
-st.plotly_chart(fig_scatter, use_container_width=True)
-# Rodapé com informações adicionais
-st.markdown("---")
-st.markdown(
-    """
-    <style>
-        footer {
-            visibility: hidden;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True,
+
+st.subheader("Minimum temperature by station")
+st.plotly_chart(
+    px.bar(
+        filtered_data,
+        x="Station",
+        y="Min Temperature (°C)",
+        color="Min Temperature (°C)",
+        color_continuous_scale="Blues",
+        labels={"Min Temperature (°C)": "Minimum temperature (°C)"},
+    ),
+    use_container_width=True,
 )
-st.markdown(
-    """
-    <div style='text-align: center; color: gray; font-size: 0.8em;'>
-        Dashboard de Estações - Dados de Temperatura
-    </div>
-    """,
-    unsafe_allow_html=True,
+
+st.subheader("Maximum temperature by station")
+st.plotly_chart(
+    px.bar(
+        filtered_data,
+        x="Station",
+        y="Max Temperature (°C)",
+        color="Max Temperature (°C)",
+        color_continuous_scale="Reds",
+        labels={"Max Temperature (°C)": "Maximum temperature (°C)"},
+    ),
+    use_container_width=True,
 )
-# Fim do script
+
+st.subheader("Minimum versus maximum temperature")
+st.plotly_chart(
+    px.scatter(
+        filtered_data,
+        x="Min Temperature (°C)",
+        y="Max Temperature (°C)",
+        size=filtered_data["Average Temperature (°C)"].abs(),
+        hover_name="Station",
+        labels={
+            "Min Temperature (°C)": "Minimum temperature (°C)",
+            "Max Temperature (°C)": "Maximum temperature (°C)",
+        },
+    ),
+    use_container_width=True,
+)
+
+st.caption("Data generated locally with the One Billion Row Challenge pipelines.")

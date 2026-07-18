@@ -1,0 +1,44 @@
+{
+  "run_date": "2026-07-18",
+  "hardware": {
+    "cpus": 20,
+    "ram_gib": 15,
+    "swap_gib": 4,
+    "disk_free_before_gib": 873
+  },
+  "input": {
+    "rows": 1000000000,
+    "file_size_gib": 14.8,
+    "generation_seconds": 324,
+    "source": "console output of create_measurements.py, cross-checked against `ls -lh data/weather_stations.csv`"
+  },
+  "scope_note": "Only the fast implementations were re-run at full 1B-row scale in this session (DuckDB, PyArrow, Polars lazy) — user decision, to avoid the slow stdlib/pandas paths that already take 12-24 min each on comparable hardware. Their numbers in the README's 'Historical benchmark' table are preserved from the original run, not reproduced here.",
+  "results": [
+    {
+      "implementation": "duckdb",
+      "status": "success",
+      "stations": 41343,
+      "elapsed_seconds": 22.73,
+      "source": "logs/log_duckdb.csv"
+    },
+    {
+      "implementation": "pyarrow",
+      "status": "success",
+      "stations": 41343,
+      "elapsed_seconds": 1185.02,
+      "source": "logs/log_pyarrow.csv"
+    },
+    {
+      "implementation": "polars_lazy",
+      "status": "oom_killed",
+      "elapsed_seconds": null,
+      "peak_anon_rss_gib": 12.51,
+      "source": "journalctl -k: 'Out of memory: Killed process 359924 (python) ... anon-rss:13123184kB', matches the historical README's own note that Polars eager/lazy did not complete in a 16 GiB environment"
+    }
+  ],
+  "dashboard_mart": {
+    "rows": 41343,
+    "path": "data/station_metrics_mart.csv",
+    "built_from": "measurements_duckdb.csv (the only implementation that completed and whose output create_station_metrics_mart.py reads)"
+  }
+}

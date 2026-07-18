@@ -185,12 +185,38 @@ poetry run pre-commit run --all-files
 poetry run pip-audit
 ```
 
+## Reproduced in this portfolio session (2026-07-18)
+
+Re-run end to end on a different machine — 20 CPUs, 15 GiB RAM, 4 GiB swap — to generate fresh,
+artifact-sourced numbers rather than repeat the historical table below. Full 1,000,000,000-row
+input (14.8 GiB, generated in 324 s). Scope was deliberately narrowed to the three fast
+implementations (DuckDB, PyArrow, Polars lazy); the slow stdlib/pandas paths were not re-run since
+their historical numbers (12–24 min each) already make the point.
+
+| Implementation | Result | Source |
+| --- | --- | --- |
+| **DuckDB** | ✅ **22.73 s**, 41,343 stations | `logs/log_duckdb.csv` |
+| **PyArrow** | ✅ **1,185.02 s** (~19.75 min), 41,343 stations | `logs/log_pyarrow.csv` |
+| **Polars (lazy)** | ❌ **OOM-killed** — reached 12.51 GiB resident before the kernel killed it | `journalctl -k` (kernel OOM-killer log) |
+
+Full machine-readable results: [`docs/evidence/run_results.json`](docs/evidence/run_results.json).
+
+**The Polars OOM is not a bug in this repository — it reproduces the historical finding below almost
+exactly** ("did not complete in a 16 GiB environment"), now on a 15 GiB + 4 GiB swap machine, with the
+kernel's own out-of-memory log as evidence instead of an assumption. DuckDB's out-of-core aggregation
+finished in under 23 seconds on the same 15 GiB box that killed Polars's in-memory lazy engine at
+1 billion rows — the case study's central point, reproduced rather than just asserted.
+
+![Streamlit dashboard showing the station metrics mart built from the 1-billion-row DuckDB run — min/avg/max temperature across 41,343 stations](docs/screenshots/dashboard-local.png)
+
 ## Historical benchmark
 
 The following measurements were collected on a Dell OptiPlex homelab with an
 Intel Core i5-14500T, 16 GiB RAM, and Ubuntu Server. They are useful for
 directional comparison only; operating-system caches, library versions,
-storage, CPU settings, and input generation all affect the result.
+storage, CPU settings, and input generation all affect the result. DuckDB and
+PyArrow were re-verified on different hardware above; the rows below are
+preserved as originally recorded.
 
 | Approach | Result from the recorded run |
 | --- | --- |

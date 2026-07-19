@@ -1,4 +1,4 @@
-# One Billion Row Challenge — Python Edition
+# One Billion Row Challenge in Python
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -10,8 +10,8 @@ implementations side by side so that memory use, execution time, and output
 formats can be compared across Python, pandas, PyArrow, Polars, and DuckDB.
 
 The project is designed for local experimentation and portfolio review. It is
-not a production data platform and the historical benchmark numbers below are
-hardware-specific.
+not a production data platform, and the historical benchmark numbers below
+are hardware-specific.
 
 ## What the project does
 
@@ -187,27 +187,40 @@ poetry run pip-audit
 
 ## Reproduced in this portfolio session (2026-07-18)
 
-Re-run end to end on a different machine — 20 CPUs, 15 GiB RAM, 4 GiB swap — to generate fresh,
-artifact-sourced numbers rather than repeat the historical table below. Full 1,000,000,000-row
-input (14.8 GiB, generated in 324 s). Scope was deliberately narrowed to the three fast
-implementations (DuckDB, PyArrow, Polars lazy); the slow stdlib/pandas paths were not re-run since
-their historical numbers (12–24 min each) already make the point.
+Rather than just carry the historical numbers forward, this repo was re-run end to end on a
+different machine: 20 CPUs, 15 GiB of RAM, 4 GiB of swap. The idea was to test whether the
+original conclusions actually hold on different hardware, not to assume they do. The full
+1,000,000,000-row input was generated again from scratch (14.8 GiB on disk, 324 seconds to write),
+and three implementations were re-run against it: DuckDB, PyArrow, and Polars in lazy mode. The
+slower stdlib and pandas approaches were left alone this time. Their historical numbers already
+took 12 to 24 minutes each on comparable hardware, and re-running them wouldn't have changed
+what this reproduction was trying to show.
 
 | Implementation | Result | Source |
 | --- | --- | --- |
 | **DuckDB** | ✅ **22.73 s**, 41,343 stations | `logs/log_duckdb.csv` |
-| **PyArrow** | ✅ **1,185.02 s** (~19.75 min), 41,343 stations | `logs/log_pyarrow.csv` |
-| **Polars (lazy)** | ❌ **OOM-killed** — reached 12.51 GiB resident before the kernel killed it | `journalctl -k` (kernel OOM-killer log) |
+| **PyArrow** | ✅ **1,185.02 s** (about 19 minutes 45 seconds), 41,343 stations | `logs/log_pyarrow.csv` |
+| **Polars (lazy)** | ❌ **Killed by the kernel's out-of-memory handler.** It had climbed to 12.51 GiB of resident memory when that happened. | `journalctl -k` (kernel OOM-killer log) |
 
-Full machine-readable results: [`docs/evidence/run_results.json`](docs/evidence/run_results.json).
+Full machine-readable results are in [`docs/evidence/run_results.json`](docs/evidence/run_results.json).
 
-**The Polars OOM is not a bug in this repository — it reproduces the historical finding below almost
-exactly** ("did not complete in a 16 GiB environment"), now on a 15 GiB + 4 GiB swap machine, with the
-kernel's own out-of-memory log as evidence instead of an assumption. DuckDB's out-of-core aggregation
-finished in under 23 seconds on the same 15 GiB box that killed Polars's in-memory lazy engine at
-1 billion rows — the case study's central point, reproduced rather than just asserted.
+The Polars failure is not a bug anywhere in this repository. It is, in fact, the same outcome the
+original historical run already reported for Polars: "did not complete in a 16 GiB environment."
+Seeing it happen again independently, on different hardware, with the kernel's own memory-accounting
+log as evidence instead of a remembered result, is a stronger form of the same finding. DuckDB
+finished the identical workload, on the identical 15 GiB machine, in under 23 seconds.
 
-![Streamlit dashboard showing the station metrics mart built from the 1-billion-row DuckDB run — min/avg/max temperature across 41,343 stations](docs/screenshots/dashboard-local.png)
+Why does "lazy" not save Polars here? Lazy evaluation means Polars builds a query plan before running
+anything, and in many cases that plan can stream through data in bounded chunks instead of loading it
+all at once. But streaming isn't automatic for every operation a plan can contain, and a global
+group-by aggregation over 41,343 distinct keys, read from a single large CSV, is exactly the kind of
+step that can force the engine to hold much more state in memory than the phrase "lazy" suggests it
+should. DuckDB's engine is built around out-of-core execution as a first-class design goal for this
+type of workload; Polars' lazy API is a general-purpose query optimizer that happens to support
+streaming for some plans, not a guarantee that any given plan will run inside a fixed memory budget.
+That distinction is easy to miss until a real run against real hardware makes it obvious.
+
+![Streamlit dashboard showing the station metrics mart built from the 1-billion-row DuckDB run, with min, average, and max temperature across 41,343 stations](docs/screenshots/dashboard-local.png)
 
 ## Historical benchmark
 
@@ -258,6 +271,34 @@ engineering lesson is not only which tool is fastest. It also covers:
 - the boundary between an experiment, a portfolio case study, and a production
   data product.
 
+## Conclusions
+
+Two runs of this challenge, on two different machines, a year apart, agree on the same thing: for a
+single-machine aggregation that doesn't fit comfortably in memory, an engine built around out-of-core
+execution beats one that merely tries to be memory-efficient. DuckDB won both times, by a wide margin,
+without any tuning beyond calling it the way its own documentation recommends.
+
+That doesn't make DuckDB the right default for everything in this repository, though, and the point of
+keeping every implementation side by side is to make that visible instead of hiding it behind a single
+winner. PyArrow's streaming approach finished the full billion-row run reliably in about 20 minutes,
+with a small and predictable memory footprint. That's a reasonable trade when DuckDB isn't available,
+or when the goal is to stay inside plain Python and Arrow's columnar format rather than bring in a full
+SQL engine. Plain Python, chunked or not, is slower still, but it's also the version anyone can read
+and modify without learning a new library, which has its own value for teaching or for a codebase that
+has to stay dependency-light. And Polars, which is a genuinely fast engine in the vast majority of
+real workloads, ran into a wall here specifically because this workload was chosen to sit right at
+the edge of what fits in 15 to 16 GiB of RAM. Most day-to-day Polars usage never gets close to that
+edge, and treating this one result as a verdict on Polars overall would be reading more into it than
+the evidence supports.
+
+The more durable lesson is about how to reason before reaching for a tool, not just which one is
+fastest today. Ask what the workload actually needs: does it have to fit in memory at all, or can it
+spill to disk without much penalty? Is the bottleneck CPU, memory, or I/O? Does the tool's documentation
+claim streaming or lazy behavior because it's structurally guaranteed, or because it's usually true for
+the common case? Those questions matter more than any leaderboard, and answering them for a specific
+piece of hardware, with a real run instead of a specification sheet, is what this repository is set up
+to make cheap to do.
+
 ## Inspiration and attribution
 
 This project is based on the [One Billion Row Challenge](https://github.com/gunnarmorling/1brc)
@@ -271,4 +312,4 @@ This project is released under the [MIT License](LICENSE.md).
 
 ## Contact
 
-Andre Matiello Caramanti — [matiello.andre@hotmail.com](mailto:matiello.andre@hotmail.com)
+Andre Matiello Caramanti. [matiello.andre@hotmail.com](mailto:matiello.andre@hotmail.com)
